@@ -65,6 +65,17 @@ class Ui_EISeg(object):
         self.statusbar.setObjectName("statusbar")
         self.statusbar.setStyleSheet("QStatusBar::item {border: none;}")
         MainWindow.setStatusBar(self.statusbar)
+        # 当前图片序号：第 i / N 张 + 已标注数量
+        self.labImgIndex = QtWidgets.QLabel("", MainWindow)
+        self.labImgIndex.setObjectName("labImgIndex")
+        self.labImgIndex.setMinimumWidth(180)
+        font = self.labImgIndex.font()
+        font.setBold(True)
+        self.labImgIndex.setFont(font)
+        self.labImgIndex.setAlignment(
+            QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+        )
+        self.statusbar.addPermanentWidget(self.labImgIndex)
         self.statusbar.addPermanentWidget(
             self.show_logo(osp.join(pjpath, "resource/Paddle.png"))
         )
@@ -114,6 +125,17 @@ class Ui_EISeg(object):
             "Ctrl+D",
         )
         ModelRegion.addWidget(self.btnParamsSelect)  # 模型选择
+        self.btnSAMSelect = p_create_button(
+            "btnSAMSelect",
+            self.tr("导入SAM模型"),
+            osp.join(pjpath, "resource/Model.png"),
+            "Ctrl+Shift+D",
+        )
+        ModelRegion.addWidget(self.btnSAMSelect)  # SAM 权重导入
+        self.labModelInfo = QtWidgets.QLabel(self.tr("当前模型：未加载"))
+        self.labModelInfo.setObjectName("labModelInfo")
+        self.labModelInfo.setWordWrap(True)
+        ModelRegion.addWidget(self.labModelInfo)
         self.cheWithMask = QtWidgets.QCheckBox(self)
         self.cheWithMask.setText(self.tr("使用掩膜"))
         self.cheWithMask.setChecked(True)

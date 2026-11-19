@@ -164,3 +164,6 @@ tool/mask.png
 *.pdiparams
 *.pdiparams.info
 *.pdmodel
+# SAM weights
+*.pth
+*.pth.part

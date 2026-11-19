@@ -29,9 +29,10 @@ from qtpy.QtCore import Qt, QByteArray, QVariant, QCoreApplication, QThread, Sig
 import cv2
 import numpy as np
 
-from eiseg import pjpath, __APPNAME__, logger
+from eiseg import pjpath, __APPNAME__, __VERSION__, logger
 from widget import ShortcutWidget, PolygonAnnotation
 from controller import InteractiveController
+from inference.sam import is_sam_weight_path
 from ui import Ui_EISeg
 import util
 from util import COCO
@@ -47,13 +48,17 @@ from plugin.n2grid import RSGrids, Grids, checkOpenGrid
 class ModelThread(QThread):
     _signal = Signal(dict)
 
-    def __init__(self, controller, param_path):
+    def __init__(self, controller, param_path, use_gpu=False):
         super().__init__()
         self.controller = controller
         self.param_path = param_path
+        self.use_gpu = use_gpu
 
     def run(self):
-        success, res = self.controller.setModel(self.param_path, False)
+        try:
+            success, res = self.controller.setModel(self.param_path, self.use_gpu)
+        except Exception as e:  # 加载失败也要回传，否则界面毫无反应
+            success, res = False, e
         self._signal.emit(
             {"success": success, "res": res, "param_path": self.param_path}
         )
@@ -205,6 +210,8 @@ class APP_EISeg(QMainWindow, Ui_EISeg):
         self.toggleWidget("all", warn=False)
         self.updateModelMenu()
         self.updateRecentFile()
+        self.updateModelInfo()
+        self.updateImageIndex()
 
         # 窗口
         ## 快捷键
@@ -223,6 +230,7 @@ class APP_EISeg(QMainWindow, Ui_EISeg):
 
         self.btnAddClass.clicked.connect(self.addLabel)
         self.btnParamsSelect.clicked.connect(self.changeParam)  # 模型参数选择
+        self.btnSAMSelect.clicked.connect(self.changeSAMParam)  # SAM 权重导入
         self.cheWithMask.stateChanged.connect(self.chooseMode)  # with_mask
 
         ## 滑动
@@ -279,6 +287,13 @@ class APP_EISeg(QMainWindow, Ui_EISeg):
             "load_param",
             "Model",
             tr("加载一个模型参数"),
+        )
+        load_sam_param = action(
+            tr("导入&SAM模型"),
+            self.changeSAMParam,
+            "load_sam_param",
+            "Model",
+            tr("导入 SAM 权重（.pth）作为交互式分割模型，左键正点、右键负点即可出掩膜"),
         )
         save = action(
             tr("&保存"),
@@ -621,6 +636,7 @@ class APP_EISeg(QMainWindow, Ui_EISeg):
                 open_folder,
                 change_output_dir,
                 load_param,
+                load_sam_param,
                 clear_recent,
                 recent_files,
                 recent_params,
@@ -812,6 +828,8 @@ class APP_EISeg(QMainWindow, Ui_EISeg):
         self.settings.setValue("recent_params", self.recentModels)
 
     def setModelParam(self, paramPath):
+        if is_sam_weight_path(paramPath):
+            return self.changeSAMParam(paramPath)
         res = self.changeParam(paramPath)
         if res:
             return True
@@ -846,9 +864,45 @@ class APP_EISeg(QMainWindow, Ui_EISeg):
             return False
 
         # success, res = self.controller.setModel(param_path)
-        self.load_thread = ModelThread(self.controller, param_path)
+        self.load_thread = ModelThread(self.controller, param_path, False)
         self.load_thread._signal.connect(self.__change_model_callback)
         self.load_thread.start()
+        return True
+
+    def changeSAMParam(self, sam_path: str = None):
+        """导入 SAM 权重（.pth）作为交互式分割后端"""
+        if not isinstance(sam_path, str) or sam_path is False:
+            recentSAM = [
+                m for m in self.recentModels if is_sam_weight_path(m["param_path"])
+            ]
+            start_path = (
+                osp.dirname(recentSAM[0]["param_path"]) if len(recentSAM) > 0 else "."
+            )
+            if self.settings.value("use_qt_widget", False, type=bool):
+                options = QtWidgets.QFileDialog.DontUseNativeDialog
+            else:
+                options = QtWidgets.QFileDialog.ReadOnly
+            sam_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                self.tr("选择SAM模型权重") + " - " + __APPNAME__,
+                start_path,
+                self.tr("SAM模型权重(*.pth *.pt)"),
+                options=options,
+            )
+        if not sam_path:
+            return False
+
+        # 中文路径 paddle 读不了，SAM 也统一要求英文路径，避免踩坑
+        if check_cn(sam_path):
+            self.warn(self.tr("权重路径存在中文"), self.tr("请修改权重路径为非中文路径！"))
+            return False
+
+        self.statusbar.showMessage(self.tr("正在加载SAM模型，请稍候..."))
+        # use_gpu=None：由 SAM 自己检测 CUDA
+        self.load_thread = ModelThread(self.controller, sam_path, None)
+        self.load_thread._signal.connect(self.__change_model_callback)
+        self.load_thread.start()
+        return True
 
     def __change_model_callback(self, signal_dict: dict):
         success = signal_dict["success"]
@@ -864,15 +918,46 @@ class APP_EISeg(QMainWindow, Ui_EISeg):
                 self.recentModels.remove(model_dict)
                 self.recentModels.insert(0, model_dict)
             self.settings.setValue("recent_models", self.recentModels)
+            self.updateModelInfo()
             self.statusbar.showMessage(
                 osp.basename(param_path) + self.tr(" 模型加载成功"), 10000
             )
             return True
         else:
+            self.updateModelInfo()
             self.warnException(res)
             return False
 
+    def updateModelInfo(self):
+        """在模型面板上显示当前使用的分割后端"""
+        model = self.controller.model if self.controller else None
+        is_sam = getattr(model, "is_sam", False)
+        if model is None:
+            text = self.tr("当前模型：未加载")
+            tip = self.tr("请先加载模型参数，或导入 SAM 权重")
+        elif is_sam:
+            text = f"{self.tr('当前模型')}：{model.name}（{model.device}）"
+            tip = f"{model.ckpt_path}\n" + self.tr(
+                "SAM 用法：左键点击目标内部添加正点，右键点击多余区域添加负点，空格完成当前目标。"
+            )
+        else:
+            text = f"{self.tr('当前模型')}：PaddleSeg"
+            tip = self.tr("PaddleSeg 交互式分割模型")
+        self.labModelInfo.setText(text)
+        self.labModelInfo.setToolTip(tip)
+        # 掩膜（上一轮预测回填）是 PaddleSeg 交互模型的机制，SAM 不需要
+        self.cheWithMask.setEnabled(not is_sam)
+        if is_sam:
+            self.cheWithMask.setToolTip(
+                self.tr("SAM 不使用上一轮预测掩膜，该选项已禁用")
+            )
+        else:
+            self.cheWithMask.setToolTip("")
+
     def chooseMode(self):
+        if getattr(self.controller.model, "is_sam", False):
+            self.statusbar.showMessage(self.tr("SAM 模型不使用掩膜选项"), 10000)
+            return
         self.predictor_params["predictor_params"][
             "with_mask"
         ] = self.cheWithMask.isChecked()
@@ -1181,6 +1266,7 @@ class APP_EISeg(QMainWindow, Ui_EISeg):
         self.currIdx = self.listFiles.count() - 1
         self.listFiles.setCurrentRow(self.currIdx)  # 移动位置
         self.imagePaths.append(filePath)
+        self.updateImageIndex()
         return True
 
     def openFolder(self, inputDir: str = None):
@@ -1210,6 +1296,7 @@ class APP_EISeg(QMainWindow, Ui_EISeg):
         self.saveImage(close=True)
         self.imagePaths = []
         self.listFiles.clear()
+        self.updateImageIndex()
 
         # 3. 扫描文件夹下所有图片
         # 3.1 获取所有文件名
@@ -1374,6 +1461,7 @@ class APP_EISeg(QMainWindow, Ui_EISeg):
         self.loadLabel(path)
         self.addRecentFile(path)
         self.imagePath = path
+        self.updateImageIndex()
         return True
 
     def loadLabel(self, imgPath):
@@ -1463,6 +1551,7 @@ class APP_EISeg(QMainWindow, Ui_EISeg):
                 else:
                     self.statusbar.showMessage(self.tr(f"没有前一张图片"))
                 self.saveImage(False)
+                self.updateImageIndex()
                 return
             else:
                 self.saveImage(True)
@@ -1470,9 +1559,49 @@ class APP_EISeg(QMainWindow, Ui_EISeg):
             # 2. 打开新图
             self.loadImage(self.imagePaths[self.currIdx])
             self.listFiles.setCurrentRow(self.currIdx)
+            self.updateImageIndex()
         else:
             self.turnGrid(delta)
         self.setDirty(False)
+
+    def labeledImageCount(self):
+        """统计标签目录中已经有标注的图片数量，无法统计时返回 None"""
+        if not self.imagePaths or not self.outputDir:
+            return None
+        if not osp.exists(self.outputDir):
+            return None
+        try:
+            names = os.listdir(self.outputDir)
+        except OSError:
+            return None
+        stems = set()
+        for name in names:
+            stem, ext = osp.splitext(name)
+            if ext.lower() in (".png", ".bmp", ".jpg", ".jpeg", ".tif", ".tiff", ".json"):
+                stems.add(stem)
+        if not stems:
+            return 0
+        return sum(
+            1 for p in self.imagePaths if osp.splitext(osp.basename(p))[0] in stems
+        )
+
+    def updateImageIndex(self):
+        """刷新状态栏上的图片序号与已标注数量（第 i / N 张）"""
+        total = len(self.imagePaths)
+        if total == 0:
+            self.labImgIndex.setText(self.tr("第 0 / 0 张"))
+            self.labImgIndex.setToolTip(self.tr("尚未打开图片"))
+            self.setWindowTitle(f"{__APPNAME__} {__VERSION__}")
+            return
+        curr = min(max(self.currIdx, 0), total - 1)
+        text = self.tr("第 %d / %d 张") % (curr + 1, total)
+        labeled = self.labeledImageCount()
+        if labeled is not None:
+            text += "  |  " + self.tr("已标注 %d 张") % labeled
+        self.labImgIndex.setText(text)
+        name = osp.basename(self.imagePaths[curr])
+        self.labImgIndex.setToolTip(self.imagePaths[curr])
+        self.setWindowTitle(f"{name} ({curr + 1}/{total}) - {__APPNAME__} {__VERSION__}")
 
     def imageListClicked(self):
         if not self.controller:
@@ -1685,6 +1814,7 @@ class APP_EISeg(QMainWindow, Ui_EISeg):
 
         self.setDirty(False)
         self.statusbar.showMessage(self.tr("标签成功保存至") + " " + savePath, 5000)
+        self.updateImageIndex()
 
     def chooseSavePath(self):
         formats = [
@@ -1762,6 +1892,7 @@ class APP_EISeg(QMainWindow, Ui_EISeg):
                     self.importLabelList(lab_auto_save)
                 except:
                     pass
+        self.updateImageIndex()
         return True
 
     def maskOpacityChanged(self):

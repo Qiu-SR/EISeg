@@ -1,0 +1,10 @@
+# SAM 交互式分割后端（可选依赖，不影响 PaddleSeg 模型的使用）
+#
+# CUDA 版 torch / torchvision 请按显卡驱动选择，例如：
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+torch>=2.0
+# segment-anything 的 predictor 依赖 torchvision 的 ResizeLongestSide
+torchvision>=0.15
+# segment-anything 只需要源码，安装时用 --no-deps 避免拉入不匹配的 torchvision
+#   pip install --no-deps git+https://github.com/facebookresearch/segment-anything.git
+segment-anything @ git+https://github.com/facebookresearch/segment-anything.git

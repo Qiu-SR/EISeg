@@ -25,6 +25,21 @@ import cv2
 __APPNAME__ = "EISeg"
 __VERSION__ = "0.5.0"
 
+# PyTorch 必须在 paddle 之前导入。
+# Windows 上如果先 import paddle 再 import torch，torch 的 shm.dll 会因为依赖冲突
+# 加载失败（OSError: [WinError 127]），SAM 后端也就用不了；反过来先导入 torch 则两者
+# 都能正常工作。所以这里做一次「尽力而为」的提前导入：没装 torch 时直接跳过，
+# 不影响只使用 PaddleSeg 模型的用户。设置环境变量 EISEG_NO_TORCH=1 可以关闭这一步。
+TORCH_READY = False
+if os.environ.get("EISEG_NO_TORCH", "") != "1":
+    try:
+        import torch  # noqa: F401
+
+        TORCH_READY = True
+    except Exception:  # noqa: BLE001  torch 缺失或 DLL 不可用时静默跳过
+        TORCH_READY = False
+
+
 
 pjpath = osp.dirname(osp.realpath(__file__))
 sys.path.append(pjpath)

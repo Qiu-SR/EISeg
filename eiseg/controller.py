@@ -26,6 +26,7 @@ import paddle
 from eiseg import logger
 from inference import clicker
 from inference.predictor import get_predictor
+from inference.sam import is_sam_weight_path
 import util
 from util.vis import draw_with_blend_and_clicks
 from models import EISegModel
@@ -100,6 +101,9 @@ class InteractiveController:
 
         """
         if param_path is not None:
+            # SAM 权重（.pth/.pt）与 PaddleSeg 静态模型走不同的加载路径
+            if is_sam_weight_path(param_path):
+                return self.setSAMModel(param_path, use_gpu)
             model_path = param_path.replace(".pdiparams", ".pdmodel")
             if not osp.exists(model_path):
                 raise Exception(f"未在 {model_path} 找到模型文件")
@@ -117,6 +121,33 @@ class InteractiveController:
                 return False, str(e)
             logger.info(f"Load model {model_path} took {time.time() - tic}")
             return True, "模型设置成功"
+
+    def setSAMModel(self, ckpt_path, use_gpu=None):
+        """加载 SAM 权重作为交互式分割后端.
+
+        Parameters
+        ----------
+        ckpt_path : str
+            SAM 权重路径（sam_vit_b/l/h 的 .pth）
+        use_gpu : bool
+            None: 自动检测（有 CUDA 就用 GPU）
+
+        Returns
+        -------
+        bool, str
+            是否成功设置模型, 失败原因
+        """
+        # 延迟导入：没装 torch / segment-anything 时不影响 EISeg 启动
+        from inference.sam import SAMModel
+
+        tic = time.time()
+        self.model = SAMModel(ckpt_path, use_gpu)
+        self.predictor = None  # 强制重建推理器
+        self.reset_predictor()
+        logger.info(
+            f"Load SAM {self.model.arch} ({self.model.device}) took {time.time() - tic}"
+        )
+        return True, f"SAM 模型设置成功（{self.model.arch}, {self.model.device}）"
 
     def setImage(self, image: np.array):
         """设置当前标注的图片
@@ -322,6 +353,15 @@ class InteractiveController:
         """
         if predictor_params is not None:
             self.predictor_params = predictor_params
+        if self.model is None:
+            return
+        if getattr(self.model, "is_sam", False):
+            # SAM 推理器自带图像编码缓存，重复调用不会重复编码
+            if self.predictor is None or not getattr(self.predictor, "is_sam", False):
+                self.predictor = self.model.build_predictor()
+            if self.image is not None:
+                self.predictor.set_input_image(self.image)
+            return
         if self.model.model:
             self.predictor = get_predictor(self.model.model, **self.predictor_params)
             if self.image is not None:
@@ -411,7 +451,7 @@ class InteractiveController:
 
     @property
     def modelName(self):
-        return self.model.__name__
+        return getattr(self.model, "name", getattr(self.model, "__name__", "未知模型"))
 
     @property
     def imageSet(self):
